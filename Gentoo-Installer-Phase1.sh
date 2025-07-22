@@ -13,7 +13,7 @@
 # Exit immediately if a command exits with a non-zero status.
 set -e
 # Treat unset variables as an error
-set -u
+# set -u # Temporarily disabled for the new selection logic
 # If any command in a pipeline fails, the pipeline's return status is the value of the last command to exit with a non-zero status
 set -o pipefail
 
@@ -51,7 +51,6 @@ function check_state() {
     grep -q "^$1=true$" "${STATE_FILE}"
 }
 
-# FIX: Load saved configuration variables from a file
 function load_configuration() {
     if [ -f "${CONFIG_FILE}" ]; then
         print_info "Previous configuration found. Loading settings..."
@@ -60,10 +59,8 @@ function load_configuration() {
     fi
 }
 
-# FIX: Save configuration variables to a file
 function save_configuration() {
     print_info "Saving installation configuration..."
-    # Create the config file, ensuring passwords are quoted to handle special characters
     cat > "${CONFIG_FILE}" <<EOF
 # Gentoo Installer Configuration
 GENTOO_USER='${GENTOO_USER}'
@@ -135,12 +132,12 @@ function gather_user_input() {
 
     print_info "Choose an installation profile:"
     select profile_choice in "Minimal (KDE Desktop + Tools)" "Standard (Minimal + Office/Media)" "Full (Standard + All Extras)"; do
-        case $profile_choice in
-            "Minimal (KDE Desktop + Tools)") GENTOO_PROFILE="minimal"; break;;
-            "Standard (Minimal + Office/Media)") GENTOO_PROFILE="standard"; break;;
-            "Full (Standard + All Extras)") GENTOO_PROFILE="full"; break;;
-            *) print_error "Invalid option. Please choose 1, 2, or 3.";;
-        esac
+        if [[ -n "$profile_choice" ]]; then
+            GENTOO_PROFILE=$(echo "$profile_choice" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')
+            break
+        else
+            print_error "Invalid option. Please choose 1, 2, or 3.";
+        fi
     done
 
     print_info "Choose a filesystem for your root partition:"
@@ -153,16 +150,29 @@ function gather_user_input() {
         fi
     done
 
+    # FIX: More robust disk detection, ignoring read-only and loop devices.
     print_info "Detecting available disks..."
-    mapfile -t disks < <(lsblk -d -n -o NAME,SIZE,MODEL,TYPE | awk '$4 == "disk" {printf "%-10s %-10s %s\n", $1, $2, $3}')
-    echo "Please select the target disk for Gentoo installation:"
-    select disk_line in "${disks[@]}"; do
-        if [[ -n "$disk_line" ]]; then
-            TARGET_DISK_NAME=$(echo "$disk_line" | awk '{print $1}')
+    mapfile -t disks < <(lsblk -d -n -o NAME,SIZE,MODEL,TYPE,RO | awk '$5 == "0" && $4 != "loop" {printf "%-10s %-10s %s\n", $1, $2, $3}')
+    
+    if [ ${#disks[@]} -eq 0 ]; then
+        print_error "No writeable physical disks found. Cannot proceed with installation."
+        exit 1
+    fi
+
+    while true; do
+        echo "Please select the target disk for Gentoo installation:"
+        for i in "${!disks[@]}"; do
+            printf "  %d) %s\n" "$((i+1))" "${disks[$i]}"
+        done
+        
+        read -p "Enter the number of the disk: " disk_choice
+        
+        if [[ "$disk_choice" =~ ^[0-9]+$ ]] && [ "$disk_choice" -ge 1 ] && [ "$disk_choice" -le "${#disks[@]}" ]; then
+            TARGET_DISK_NAME=$(echo "${disks[$((disk_choice-1))]}" | awk '{print $1}')
             TARGET_DISK="/dev/${TARGET_DISK_NAME}"
             break
         else
-            print_error "Invalid selection. Please try again."
+            print_error "Invalid input. Please enter a number between 1 and ${#disks[@]}."
         fi
     done
 
@@ -181,7 +191,6 @@ function gather_user_input() {
         exit 1
     fi
     
-    # FIX: Save configuration after user confirms
     save_configuration
 }
 
@@ -361,7 +370,6 @@ function main() {
     mkdir -p ${CHROOT_DIR}
     touch "${STATE_FILE}"
 
-    # FIX: Load configuration at the start to handle resumes
     load_configuration
 
     if ! check_state "USER_INPUT_COMPLETE"; then
