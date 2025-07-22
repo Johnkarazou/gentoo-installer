@@ -1,8 +1,8 @@
 #!/bin/bash
 #
 # Gentoo Zen Installer - Phase 1
-# Author: johnkarazou
-# Version: 1.0
+# Author: JohnKarazou
+# Version: 1.1
 #
 # This script automates the initial phase of a Gentoo Linux installation.
 # It handles user configuration, hardware detection, partitioning,
@@ -66,8 +66,8 @@ function run_preflight_checks() {
     fi
     # Check for required tools
     for tool in curl lsblk sgdisk nproc dmidecode lspci; do
-        if ! command -v $tool &> /dev/null; then
-            print_error "Required command '$tool' not found. Please use a standard Gentoo live environment."
+        if ! command -v $tool &> /dev/null;
+            then print_error "Required command '$tool' not found. Please use a standard Gentoo live environment."
             exit 1
         fi
     done
@@ -80,23 +80,30 @@ function gather_user_input() {
 
     # Username
     read -p "Enter your desired username: " GENTOO_USER
+
     # Passwords
     while true; do
-        read -s -p "Enter a password for your user: " GENTOO_USER_PASSWORD
+        read -s -p "Enter a password for '$GENTOO_USER': " GENTOO_USER_PASSWORD
         echo
         read -s -p "Confirm user password: " GENTOO_USER_PASSWORD_CONFIRM
         echo
         [ "$GENTOO_USER_PASSWORD" = "$GENTOO_USER_PASSWORD_CONFIRM" ] && break
         print_error "Passwords do not match. Please try again."
     done
-    while true; do
-        read -s -p "Enter a password for the 'root' user: " GENTOO_ROOT_PASSWORD
-        echo
-        read -s -p "Confirm root password: " GENTOO_ROOT_PASSWORD_CONFIRM
-        echo
-        [ "$GENTOO_ROOT_PASSWORD" = "$GENTOO_ROOT_PASSWORD_CONFIRM" ] && break
-        print_error "Passwords do not match. Please try again."
-    done
+
+    read -p "Use the same password for the 'root' account? (y/n): " use_same_password
+    if [[ "$use_same_password" == "y" || "$use_same_password" == "Y" ]]; then
+        GENTOO_ROOT_PASSWORD=$GENTOO_USER_PASSWORD
+    else
+        while true; do
+            read -s -p "Enter a password for the 'root' user: " GENTOO_ROOT_PASSWORD
+            echo
+            read -s -p "Confirm root password: " GENTOO_ROOT_PASSWORD_CONFIRM
+            echo
+            [ "$GENTOO_ROOT_PASSWORD" = "$GENTOO_ROOT_PASSWORD_CONFIRM" ] && break
+            print_error "Passwords do not match. Please try again."
+        done
+    fi
 
     # Hostname
     read -p "Enter the hostname for this computer (e.g., gentoo-desktop): " GENTOO_HOSTNAME
@@ -120,21 +127,41 @@ function gather_user_input() {
         esac
     done
 
-    # Disks
-    print_info "Available disks:"
-    lsblk -d -n -o NAME,SIZE,MODEL
-    read -p "Enter the primary disk for Gentoo installation (e.g., /dev/nvme0n1 or /dev/sda): " ROOT_DISK
-    # TODO: Add logic for separate /home, ccache, etc.
+    # Filesystem Choice
+    print_info "Choose a filesystem for your root partition:"
+    select fs_choice in "ext4" "btrfs" "xfs"; do
+        if [[ -n "$fs_choice" ]]; then
+            ROOT_FS=$fs_choice
+            break
+        else
+            print_error "Invalid option. Please choose 1, 2, or 3."
+        fi
+    done
+
+    # Disk Selection
+    print_info "Detecting available disks..."
+    mapfile -t disks < <(lsblk -d -n -o NAME,SIZE,MODEL | grep -v 'iso9660') # Exclude Live USB
+    echo "Please select the target disk for Gentoo installation:"
+    select disk_line in "${disks[@]}"; do
+        if [[ -n "$disk_line" ]]; then
+            TARGET_DISK_NAME=$(echo "$disk_line" | awk '{print $1}')
+            TARGET_DISK="/dev/${TARGET_DISK_NAME}"
+            break
+        else
+            print_error "Invalid selection. Please try again."
+        fi
+    done
 
     # Final Confirmation
     print_header "Installation Summary"
-    echo "Username:      $GENTOO_USER"
-    echo "Hostname:      $GENTOO_HOSTNAME"
-    echo "Timezone:      $GENTOO_TIMEZONE"
-    echo "Locale:        $GENTOO_LOCALE"
-    echo "Profile:       $GENTOO_PROFILE"
-    echo "Target Disk:   $ROOT_DISK"
-    echo -e "\n\e[1;31mWARNING: All data on ${ROOT_DISK} will be destroyed!\e[0m"
+    echo "Username:          $GENTOO_USER"
+    echo "Hostname:          $GENTOO_HOSTNAME"
+    echo "Timezone:          $GENTOO_TIMEZONE"
+    echo "Locale:            $GENTOO_LOCALE"
+    echo "Profile:           $GENTOO_PROFILE"
+    echo "Target Disk:       $TARGET_DISK"
+    echo "Root Filesystem:   $ROOT_FS"
+    echo -e "\n\e[1;31mWARNING: All data on ${TARGET_DISK} will be destroyed!\e[0m"
     read -p "To proceed, type 'YES, I AM SURE': " confirmation
     if [ "$confirmation" != "YES, I AM SURE" ]; then
         print_error "Confirmation failed. Aborting installation."
@@ -144,28 +171,54 @@ function gather_user_input() {
 
 # --- Automated Steps ---
 function execute_partitioning() {
-    print_header "Partitioning Disk: ${ROOT_DISK}"
+    print_header "Partitioning Disk: ${TARGET_DISK}"
     # Zap all existing partition data
-    sgdisk --zap-all ${ROOT_DISK}
+    sgdisk --zap-all ${TARGET_DISK}
     # Create EFI partition (600M)
-    sgdisk --new=1:0:+600M --typecode=1:ef00 --change-name=1:'EFI System' ${ROOT_DISK}
+    sgdisk --new=1:0:+600M --typecode=1:ef00 --change-name=1:'EFI System' ${TARGET_DISK}
     # Create root partition (rest of disk)
-    sgdisk --new=2:0:0 --typecode=2:8300 --change-name=2:'Gentoo Root' ${ROOT_DISK}
+    sgdisk --new=2:0:0 --typecode=2:8300 --change-name=2:'Gentoo Root' ${TARGET_DISK}
     # Inform kernel of changes
-    partprobe ${ROOT_DISK}
+    partprobe ${TARGET_DISK}
     sleep 2 # Give kernel time to see new partitions
+
+    # FIX: Correctly determine partition names
+    if [[ $TARGET_DISK == *"nvme"* ]]; then
+        EFI_PARTITION="${TARGET_DISK}p1"
+        ROOT_PARTITION="${TARGET_DISK}p2"
+    else
+        EFI_PARTITION="${TARGET_DISK}1"
+        ROOT_PARTITION="${TARGET_DISK}2"
+    fi
+
+    print_info "EFI Partition: ${EFI_PARTITION}"
+    print_info "Root Partition: ${ROOT_PARTITION}"
+
     # Formatting
     print_info "Formatting partitions..."
-    mkfs.vfat -F 32 "${ROOT_DISK}p1"
-    mkfs.ext4 -L "GENTOO_ROOT" "${ROOT_DISK}p2"
+    mkfs.vfat -F 32 "${EFI_PARTITION}"
+    case "$ROOT_FS" in
+        ext4) mkfs.ext4 -L "GENTOO_ROOT" "${ROOT_PARTITION}";;
+        btrfs) mkfs.btrfs -L "GENTOO_ROOT" "${ROOT_PARTITION}";;
+        xfs) mkfs.xfs -L "GENTOO_ROOT" "${ROOT_PARTITION}";;
+    esac
     print_success "Disk partitioning and formatting complete."
 }
 
 function mount_filesystems() {
     print_header "Mounting Filesystems"
-    mount "${ROOT_DISK}p2" ${CHROOT_DIR}
+    # Re-determine partition names for mounting
+    if [[ $TARGET_DISK == *"nvme"* ]]; then
+        EFI_PARTITION="${TARGET_DISK}p1"
+        ROOT_PARTITION="${TARGET_DISK}p2"
+    else
+        EFI_PARTITION="${TARGET_DISK}1"
+        ROOT_PARTITION="${TARGET_DISK}2"
+    fi
+
+    mount "${ROOT_PARTITION}" ${CHROOT_DIR}
     mkdir -p "${CHROOT_DIR}/efi"
-    mount "${ROOT_DISK}p1" "${CHROOT_DIR}/efi"
+    mount "${EFI_PARTITION}" "${CHROOT_DIR}/efi"
     print_success "Filesystems mounted."
 }
 
@@ -175,7 +228,7 @@ function download_and_extract_stage3() {
     local base_url="https://distfiles.gentoo.org/releases/amd64/autobuilds/"
     local pointer_file="latest-stage3-amd64-desktop-openrc.txt"
     print_info "Finding the latest stage3 tarball..."
-    local latest_info=$(curl -s "${base_url}${pointer_file}")
+    local latest_info=$(curl -s "${base_url}${pointer_file}" | head -n 1) # Get first line only
     local stage3_path=$(echo "${latest_info}" | awk '{print $1}')
     local stage3_url="${base_url}${stage3_path}"
     
@@ -196,7 +249,8 @@ function configure_chroot() {
     # Create make.conf
     print_info "Generating make.conf..."
     local nproc=$(nproc)
-    local video_cards="amdgpu" # Based on guide
+    local video_cards="amdgpu" # Based on guide, can be made adaptive later
+    mkdir -p "${CHROOT_DIR}/etc/portage"
     cat > "${CHROOT_DIR}/etc/portage/make.conf" <<EOF
 # Generated by Gentoo Zen Installer
 CARCH="x86_64"
@@ -241,8 +295,8 @@ function on_interrupt_phase2() {
 source /etc/profile
 export PS1="(chroot) ${PS1}"
 print_info() { echo -e "\e[1;34m[INFO] $1\e[0m"; }
-emerge --sync
 emerge-webrsync
+emerge --sync
 eselect profile set default/linux/amd64/17.1/desktop/plasma/openrc
 emerge -vuDN @world
 emerge sys-kernel/gentoo-sources sys-kernel/linux-firmware
@@ -299,12 +353,16 @@ EOF
 # --- Main Execution Flow ---
 function main() {
     run_preflight_checks
-    gather_user_input
     
-    # Create the mount point
+    # Create the mount point if it doesn't exist
     mkdir -p ${CHROOT_DIR}
-    # Create the state file
+    # Create the state file if it doesn't exist
     touch "${STATE_FILE}"
+
+    if ! check_state "USER_INPUT_COMPLETE"; then
+        gather_user_input
+        update_state "USER_INPUT_COMPLETE"
+    fi
 
     if ! check_state "PARTITIONING_COMPLETE"; then
         execute_partitioning
