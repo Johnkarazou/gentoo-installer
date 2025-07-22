@@ -2,7 +2,7 @@
 #
 # Gentoo Zen Installer - Phase 1
 # Author: JohnKarazou
-# Version: 1.2
+# Version: 1.3
 #
 # This script automates the initial phase of a Gentoo Linux installation.
 # It handles user configuration, hardware detection, partitioning,
@@ -40,31 +40,57 @@ function print_error() { echo -e "\e[1;31m[ERROR] $1\e[0m" >&2; }
 function print_success() { echo -e "\e[1;32m[OK] $1\e[0m"; }
 function print_info() { echo -e "\e[1;34m[INFO] $1\e[0m"; }
 
-# --- State Management ---
-# The state file tracks the completion of major steps.
+# --- State & Config Management ---
 CHROOT_DIR="/mnt/gentoo"
 STATE_FILE="${CHROOT_DIR}/.install_state"
+CONFIG_FILE="${CHROOT_DIR}/.install_config"
+
 function update_state() { echo "$1=true" >> "${STATE_FILE}"; print_success "State updated: $1."; }
 function check_state() {
-    # Ensure the state file exists before trying to grep it
     [ ! -f "${STATE_FILE}" ] && return 1
     grep -q "^$1=true$" "${STATE_FILE}"
 }
 
+# FIX: Load saved configuration variables from a file
+function load_configuration() {
+    if [ -f "${CONFIG_FILE}" ]; then
+        print_info "Previous configuration found. Loading settings..."
+        source "${CONFIG_FILE}"
+        print_success "Settings loaded."
+    fi
+}
+
+# FIX: Save configuration variables to a file
+function save_configuration() {
+    print_info "Saving installation configuration..."
+    # Create the config file, ensuring passwords are quoted to handle special characters
+    cat > "${CONFIG_FILE}" <<EOF
+# Gentoo Installer Configuration
+GENTOO_USER='${GENTOO_USER}'
+GENTOO_USER_PASSWORD='${GENTOO_USER_PASSWORD}'
+GENTOO_ROOT_PASSWORD='${GENTOO_ROOT_PASSWORD}'
+GENTOO_HOSTNAME='${GENTOO_HOSTNAME}'
+GENTOO_TIMEZONE='${GENTOO_TIMEZONE}'
+GENTOO_LOCALE='${GENTOO_LOCALE}'
+GENTOO_PROFILE='${GENTOO_PROFILE}'
+ROOT_FS='${ROOT_FS}'
+TARGET_DISK='${TARGET_DISK}'
+EOF
+    print_success "Configuration saved to ${CONFIG_FILE}"
+}
+
+
 # --- Pre-flight Checks ---
 function run_preflight_checks() {
     print_header "Running Pre-flight Checks"
-    # Must be run as root
     if [ "${EUID}" -ne 0 ]; then
         print_error "This script must be run as root. Please use 'sudo'."
         exit 1
     fi
-    # Check for internet connectivity
     if ! ping -c 1 8.8.8.8 &> /dev/null; then
         print_error "No internet connection. Please connect to the internet and try again."
         exit 1
     fi
-    # Check for required tools
     for tool in curl lsblk sgdisk nproc dmidecode lspci; do
         if ! command -v $tool &> /dev/null;
             then print_error "Required command '$tool' not found. Please use a standard Gentoo live environment."
@@ -78,10 +104,8 @@ function run_preflight_checks() {
 function gather_user_input() {
     print_header "Gathering System Configuration"
 
-    # Username
     read -p "Enter your desired username: " GENTOO_USER
 
-    # Passwords
     while true; do
         read -s -p "Enter a password for '$GENTOO_USER': " GENTOO_USER_PASSWORD
         echo
@@ -105,18 +129,10 @@ function gather_user_input() {
         done
     fi
 
-    # Hostname
     read -p "Enter the hostname for this computer (e.g., gentoo-desktop): " GENTOO_HOSTNAME
-
-    # Timezone
-    # TODO: List timezones
     read -p "Enter your Timezone (e.g., Europe/Athens): " GENTOO_TIMEZONE
-
-    # Locale
-    # TODO: List locales
     read -p "Enter your desired locale (e.g., en_US.UTF-8): " GENTOO_LOCALE
 
-    # Installation Profile
     print_info "Choose an installation profile:"
     select profile_choice in "Minimal (KDE Desktop + Tools)" "Standard (Minimal + Office/Media)" "Full (Standard + All Extras)"; do
         case $profile_choice in
@@ -127,7 +143,6 @@ function gather_user_input() {
         esac
     done
 
-    # Filesystem Choice
     print_info "Choose a filesystem for your root partition:"
     select fs_choice in "ext4" "btrfs" "xfs"; do
         if [[ -n "$fs_choice" ]]; then
@@ -138,9 +153,7 @@ function gather_user_input() {
         fi
     done
 
-    # Disk Selection
     print_info "Detecting available disks..."
-    # FIX: Filter lsblk output to only show devices of type 'disk'
     mapfile -t disks < <(lsblk -d -n -o NAME,SIZE,MODEL,TYPE | awk '$4 == "disk" {printf "%-10s %-10s %s\n", $1, $2, $3}')
     echo "Please select the target disk for Gentoo installation:"
     select disk_line in "${disks[@]}"; do
@@ -153,7 +166,6 @@ function gather_user_input() {
         fi
     done
 
-    # Final Confirmation
     print_header "Installation Summary"
     echo "Username:          $GENTOO_USER"
     echo "Hostname:          $GENTOO_HOSTNAME"
@@ -168,22 +180,20 @@ function gather_user_input() {
         print_error "Confirmation failed. Aborting installation."
         exit 1
     fi
+    
+    # FIX: Save configuration after user confirms
+    save_configuration
 }
 
 # --- Automated Steps ---
 function execute_partitioning() {
     print_header "Partitioning Disk: ${TARGET_DISK}"
-    # Zap all existing partition data
     sgdisk --zap-all ${TARGET_DISK}
-    # Create EFI partition (600M)
     sgdisk --new=1:0:+600M --typecode=1:ef00 --change-name=1:'EFI System' ${TARGET_DISK}
-    # Create root partition (rest of disk)
     sgdisk --new=2:0:0 --typecode=2:8300 --change-name=2:'Gentoo Root' ${TARGET_DISK}
-    # Inform kernel of changes
     partprobe ${TARGET_DISK}
-    sleep 2 # Give kernel time to see new partitions
+    sleep 2
 
-    # FIX: Correctly determine partition names
     if [[ $TARGET_DISK == *"nvme"* ]]; then
         EFI_PARTITION="${TARGET_DISK}p1"
         ROOT_PARTITION="${TARGET_DISK}p2"
@@ -195,7 +205,6 @@ function execute_partitioning() {
     print_info "EFI Partition: ${EFI_PARTITION}"
     print_info "Root Partition: ${ROOT_PARTITION}"
 
-    # Formatting
     print_info "Formatting partitions..."
     mkfs.vfat -F 32 "${EFI_PARTITION}"
     case "$ROOT_FS" in
@@ -208,7 +217,6 @@ function execute_partitioning() {
 
 function mount_filesystems() {
     print_header "Mounting Filesystems"
-    # Re-determine partition names for mounting
     if [[ $TARGET_DISK == *"nvme"* ]]; then
         EFI_PARTITION="${TARGET_DISK}p1"
         ROOT_PARTITION="${TARGET_DISK}p2"
@@ -229,7 +237,6 @@ function download_and_extract_stage3() {
     local base_url="https://distfiles.gentoo.org/releases/amd64/autobuilds/"
     local pointer_file="latest-stage3-amd64-desktop-openrc.txt"
     print_info "Finding the latest stage3 tarball..."
-    # FIX: Correctly parse the pointer file to avoid including GPG signatures
     local latest_info=$(curl -s "${base_url}${pointer_file}" | grep '\.tar\.xz$')
     local stage3_path=$(echo "${latest_info}" | awk '{print $1}')
     local stage3_url="${base_url}${stage3_path}"
@@ -245,13 +252,11 @@ function download_and_extract_stage3() {
 
 function configure_chroot() {
     print_header "Configuring Chroot Environment"
-    # Copy DNS info
     cp --dereference /etc/resolv.conf "${CHROOT_DIR}/etc/"
 
-    # Create make.conf
     print_info "Generating make.conf..."
     local nproc=$(nproc)
-    local video_cards="amdgpu" # Based on guide, can be made adaptive later
+    local video_cards="amdgpu"
     mkdir -p "${CHROOT_DIR}/etc/portage"
     cat > "${CHROOT_DIR}/etc/portage/make.conf" <<EOF
 # Generated by Gentoo Zen Installer
@@ -269,7 +274,6 @@ ACCEPT_LICENSE="*"
 GRUB_PLATFORMS="efi-64"
 USE="X acl alsa amdgpu bluetooth cups dbus egl elogind pulseaudio udev unicode vulkan wayland"
 EOF
-    # Mount system directories
     mount --types proc /proc "${CHROOT_DIR}/proc"
     mount --rbind /sys "${CHROOT_DIR}/sys"
     mount --rbind /dev "${CHROOT_DIR}/dev"
@@ -315,7 +319,6 @@ EOF
 
 function prepare_for_reboot() {
     print_header "Preparing System for First Reboot"
-    # Create the chroot preparation script
     cat > "${CHROOT_DIR}/prepare_reboot.sh" <<EOF
 #!/bin/bash
 set -e
@@ -347,7 +350,6 @@ chmod +x /etc/init.d/runonce-installer
 rc-update add runonce-installer default
 EOF
     chmod +x "${CHROOT_DIR}/prepare_reboot.sh"
-    # Execute the preparation script inside the chroot
     chroot ${CHROOT_DIR} /prepare_reboot.sh
     print_success "System is ready for reboot."
 }
@@ -356,13 +358,14 @@ EOF
 function main() {
     run_preflight_checks
     
-    # Create the mount point if it doesn't exist
     mkdir -p ${CHROOT_DIR}
-    # Create the state file if it doesn't exist
     touch "${STATE_FILE}"
 
+    # FIX: Load configuration at the start to handle resumes
+    load_configuration
+
     if ! check_state "USER_INPUT_COMPLETE"; then
-        gather_user_input
+        gather_user_input # This function now saves the config
         update_state "USER_INPUT_COMPLETE"
     fi
 
