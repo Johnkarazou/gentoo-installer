@@ -2,7 +2,7 @@
 #
 # Gentoo Zen Installer - Phase 1
 # Author: JohnKarazou
-# Version: 1.1
+# Version: 1.2
 #
 # This script automates the initial phase of a Gentoo Linux installation.
 # It handles user configuration, hardware detection, partitioning,
@@ -140,7 +140,8 @@ function gather_user_input() {
 
     # Disk Selection
     print_info "Detecting available disks..."
-    mapfile -t disks < <(lsblk -d -n -o NAME,SIZE,MODEL | grep -v 'iso9660') # Exclude Live USB
+    # FIX: Filter lsblk output to only show devices of type 'disk'
+    mapfile -t disks < <(lsblk -d -n -o NAME,SIZE,MODEL,TYPE | awk '$4 == "disk" {printf "%-10s %-10s %s\n", $1, $2, $3}')
     echo "Please select the target disk for Gentoo installation:"
     select disk_line in "${disks[@]}"; do
         if [[ -n "$disk_line" ]]; then
@@ -228,7 +229,8 @@ function download_and_extract_stage3() {
     local base_url="https://distfiles.gentoo.org/releases/amd64/autobuilds/"
     local pointer_file="latest-stage3-amd64-desktop-openrc.txt"
     print_info "Finding the latest stage3 tarball..."
-    local latest_info=$(curl -s "${base_url}${pointer_file}" | head -n 1) # Get first line only
+    # FIX: Correctly parse the pointer file to avoid including GPG signatures
+    local latest_info=$(curl -s "${base_url}${pointer_file}" | grep '\.tar\.xz$')
     local stage3_path=$(echo "${latest_info}" | awk '{print $1}')
     local stage3_url="${base_url}${stage3_path}"
     
